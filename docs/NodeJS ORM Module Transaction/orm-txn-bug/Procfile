@@ -1,0 +1,2 @@
+single: coffee src/single.coffee
+multi: coffee src/multiple.coffee

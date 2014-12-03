@@ -1,0 +1,1008 @@
+ node_modules/orm/lib/AggregateFunctions.js   |   2 +-
+ node_modules/orm/lib/Associations/Extend.js  |  18 +-
+ node_modules/orm/lib/Associations/Many.js    |  12 +-
+ node_modules/orm/lib/Associations/One.js     |  18 +-
+ node_modules/orm/lib/ChainFind.js            |   8 +-
+ node_modules/orm/lib/Drivers/DML/postgres.js | 239 +++++++++++++++++++++++----
+ node_modules/orm/lib/Drivers/helpers.js      |  29 +++-
+ node_modules/orm/lib/Instance.js             |  10 +-
+ node_modules/orm/lib/LazyLoad.js             |   6 +-
+ node_modules/orm/lib/Model.js                | 110 +++++++-----
+ node_modules/orm/lib/ORM.js                  |  13 ++
+ node_modules/orm/lib/Utilities.js            |  33 ++++
+ 12 files changed, 387 insertions(+), 111 deletions(-)
+
+diff --git a/node_modules/orm/lib/AggregateFunctions.js b/node_modules/orm/lib/AggregateFunctions.js
+index c8d5a88..7eada5c 100644
+--- a/node_modules/orm/lib/AggregateFunctions.js
++++ b/node_modules/orm/lib/AggregateFunctions.js
+@@ -121,7 +121,7 @@ function AggregateFunctions(opts) {
+ 
+ 			query = query.build();
+ 
+-			opts.driver.execQuery(query, function (err, data) {
++			opts.driver.execQuery(query, opts.transaction, function (err, data) {
+ 				if (err) {
+ 					return cb(err);
+ 				}
+diff --git a/node_modules/orm/lib/Associations/Extend.js b/node_modules/orm/lib/Associations/Extend.js
+index 3df3c29..3c29816 100644
+--- a/node_modules/orm/lib/Associations/Extend.js
++++ b/node_modules/orm/lib/Associations/Extend.js
+@@ -31,7 +31,7 @@ exports.prepare = function (db, Model, associations, association_properties, mod
+ 			_.pick(opts, 'cache', 'autoSave', 'cascadeRemove', 'hooks', 'methods', 'validations'),
+ 			{
+ 				id        : Object.keys(association.field),
+-				extension : true,
++				extension : true
+ 			}
+ 		);
+ 
+@@ -42,8 +42,14 @@ exports.prepare = function (db, Model, associations, association_properties, mod
+ 
+ 		Model["findBy" + assocName] = function () {
+ 			var cb = null, conditions = null, options = {};
++            var transaction = null;
+ 
+ 			for (var i = 0; i < arguments.length; i++) {
++                if (util.isTransaction(arguments[i])) {
++                    transaction = arguments[i];
++                    continue;
++                }
++
+ 				switch (typeof arguments[i]) {
+ 					case "function":
+ 						cb = arguments[i];
+@@ -71,9 +77,9 @@ exports.prepare = function (db, Model, associations, association_properties, mod
+ 			options.extra = [];
+ 
+ 			if (typeof cb == "function") {
+-				return Model.find({}, options, cb);
++				return Model.find({}, options, transaction, cb);
+ 			}
+-			return Model.find({}, options);
++			return Model.find({}, options, transaction);
+ 		};
+ 
+ 		return association.model;
+@@ -111,7 +117,7 @@ function extendInstance(Model, Instance, Driver, association, opts) {
+ 			if (!Instance[Model.id]) {
+ 			    cb(ErrorCodes.generateError(ErrorCodes.NOT_DEFINED, "Instance not saved, cannot get extension", { model: Model.table }));
+ 			} else {
+-				association.model.get(util.values(Instance, Model.id), function (err, extension) {
++				association.model.get(util.values(Instance, Model.id), Instance.transaction, function (err, extension) {
+ 					return cb(err, !err && extension ? true : false);
+ 				});
+ 			}
+@@ -129,7 +135,7 @@ function extendInstance(Model, Instance, Driver, association, opts) {
+ 			if (!Instance[Model.id]) {
+ 			    cb(ErrorCodes.generateError(ErrorCodes.NOT_DEFINED, "Instance not saved, cannot get extension", { model: Model.table }));
+ 			} else {
+-				association.model.get(util.values(Instance, Model.id), opts, cb);
++				association.model.get(util.values(Instance, Model.id), opts, Instance.transaction, cb);
+ 			}
+ 			return this;
+ 		},
+@@ -176,7 +182,7 @@ function extendInstance(Model, Instance, Driver, association, opts) {
+ 				    conditions[fields[i]] = Instance[Model.id[i]];
+ 				}
+ 
+-				association.model.find(conditions, function (err, extensions) {
++				association.model.find(conditions, Instance.transaction, function (err, extensions) {
+ 					if (err) {
+ 						return cb(err);
+ 					}
+diff --git a/node_modules/orm/lib/Associations/Many.js b/node_modules/orm/lib/Associations/Many.js
+index 53b46a5..769793d 100644
+--- a/node_modules/orm/lib/Associations/Many.js
++++ b/node_modules/orm/lib/Associations/Many.js
+@@ -144,7 +144,7 @@ function extendInstance(Model, Instance, Driver, association, opts, createInstan
+ 				util.populateConditions(association.model, Object.keys(association.mergeAssocId), Instances[i], options.__merge.where[1], false);
+ 			}
+ 
+-			association.model.find(conditions, options, function (err, instances) {
++			association.model.find(conditions, options, Instance.transaction, function (err, instances) {
+ 				if (err) {
+ 					return cb(err);
+ 				}
+@@ -222,10 +222,10 @@ function extendInstance(Model, Instance, Driver, association, opts, createInstan
+ 			util.populateConditions(Model, Object.keys(association.mergeId), Instance, options.__merge.where[1]);
+ 
+ 			if (cb === null) {
+-				return association.model.find(conditions, options);
++				return association.model.find(conditions, options, Instance.transaction);
+ 			}
+ 
+-			association.model.find(conditions, options, cb);
++			association.model.find(conditions, options, Instance.transaction, cb);
+ 			return this;
+ 		},
+ 		enumerable: false
+@@ -283,14 +283,14 @@ function extendInstance(Model, Instance, Driver, association, opts, createInstan
+ 				}
+ 
+ 				if (Associations.length === 0) {
+-					return Driver.remove(association.mergeTable, conditions, cb);
++					return Driver.remove(association.mergeTable, conditions, Instance.transaction, cb);
+ 				}
+ 
+ 				for (var i = 0; i < Associations.length; i++) {
+ 					util.populateConditions(association.model, Object.keys(association.mergeAssocId), Associations[i], conditions, false);
+ 				}
+ 
+-				Driver.remove(association.mergeTable, conditions, cb);
++				Driver.remove(association.mergeTable, conditions, Instance.transaction, cb);
+ 			};
+ 
+ 			util.populateConditions(Model, Object.keys(association.mergeId), Instance, conditions);
+@@ -355,7 +355,7 @@ function extendInstance(Model, Instance, Driver, association, opts, createInstan
+ 							util.populateConditions(Model, Object.keys(association.mergeId), Instance, data);
+ 							util.populateConditions(association.model, Object.keys(association.mergeAssocId), Association, data);
+ 
+-							Driver.insert(association.mergeTable, data, null, function (err) {
++							Driver.insert(association.mergeTable, data, null, Instance.transaction, function (err) {
+ 								if (err) {
+ 									return cb(err);
+ 								}
+diff --git a/node_modules/orm/lib/Associations/One.js b/node_modules/orm/lib/Associations/One.js
+index ce71ccd..74432a5 100644
+--- a/node_modules/orm/lib/Associations/One.js
++++ b/node_modules/orm/lib/Associations/One.js
+@@ -70,8 +70,14 @@ exports.prepare = function (Model, associations, association_properties, model_f
+ 
+ 		Model["findBy" + assocTemplateName] = function () {
+ 			var cb = null, conditions = null, options = {};
++            var transaction = null;
+ 
+ 			for (var i = 0; i < arguments.length; i++) {
++                if (util.isTransaction(arguments[i])) {
++                    transaction = arguments[i];
++                    continue;
++                }
++
+ 				switch (typeof arguments[i]) {
+ 					case "function":
+ 						cb = arguments[i];
+@@ -99,9 +105,9 @@ exports.prepare = function (Model, associations, association_properties, model_f
+ 			options.extra = [];
+ 
+ 			if (typeof cb == "function") {
+-				return Model.find({}, options, cb);
++				return Model.find({}, options, transaction, cb);
+ 			}
+-			return Model.find({}, options);
++			return Model.find({}, options, transaction);
+ 		};
+ 
+ 		return this;
+@@ -142,7 +148,7 @@ function extendInstance(Model, Instance, Driver, association, opts) {
+ 			}
+ 
+ 			if (util.hasValues(Instance, Object.keys(association.field))) {
+-				association.model.get(util.values(Instance, Object.keys(association.field)), opts, function (err, instance) {
++				association.model.get(util.values(Instance, Object.keys(association.field)), opts, Instance.transaction, function (err, instance) {
+ 					return cb(err, instance ? true : false);
+ 				});
+ 			} else {
+@@ -170,7 +176,7 @@ function extendInstance(Model, Instance, Driver, association, opts) {
+ 
+ 			if (association.reversed) {
+ 				if (util.hasValues(Instance, Model.id)) {
+-					association.model.find(util.getConditions(Model, Object.keys(association.field), Instance), opts, saveAndReturn);
++					association.model.find(util.getConditions(Model, Object.keys(association.field), Instance), opts, Instance.transaction, saveAndReturn);
+ 				} else {
+ 					cb(null);
+ 				}
+@@ -180,10 +186,10 @@ function extendInstance(Model, Instance, Driver, association, opts) {
+ 						if (err || !util.hasValues(instance, Object.keys(association.field))) {
+ 							return cb(null);
+ 						}
+-						association.model.get(util.values(instance, Object.keys(association.field)), opts, saveAndReturn);
++						association.model.get(util.values(instance, Object.keys(association.field)), opts, Instance.transaction, saveAndReturn);
+ 					});
+ 				} else if (util.hasValues(Instance, Object.keys(association.field))) {
+-					association.model.get(util.values(Instance, Object.keys(association.field)), opts, saveAndReturn);
++					association.model.get(util.values(Instance, Object.keys(association.field)), opts, Instance.transaction, saveAndReturn);
+ 				} else {
+ 					cb(null);
+ 				}
+diff --git a/node_modules/orm/lib/ChainFind.js b/node_modules/orm/lib/ChainFind.js
+index 0dc8622..759efcc 100644
+--- a/node_modules/orm/lib/ChainFind.js
++++ b/node_modules/orm/lib/ChainFind.js
+@@ -68,7 +68,7 @@ function ChainFind(Model, opts) {
+ 			return this;
+ 		},
+ 		count: function (cb) {
+-			opts.driver.count(opts.table, opts.conditions, {}, function (err, data) {
++			opts.driver.count(opts.table, opts.conditions, {}, opts.transaction, function (err, data) {
+ 				if (err || data.length === 0) {
+ 					return cb(err);
+ 				}
+@@ -83,7 +83,7 @@ function ChainFind(Model, opts) {
+ 				merge  : opts.merge,
+ 				offset : opts.offset,
+ 				exists : opts.exists
+-			}, function (err, data) {
++			}, opts.transaction, function (err, data) {
+ 				if (err) {
+ 					return cb(err);
+ 				}
+@@ -99,7 +99,7 @@ function ChainFind(Model, opts) {
+ 
+ 				conditions[opts.id] = ids;
+ 
+-				return opts.driver.remove(opts.table, conditions, cb);
++				return opts.driver.remove(opts.table, conditions, opts.transaction, cb);
+ 			});
+ 			return this;
+ 		},
+@@ -140,7 +140,7 @@ function ChainFind(Model, opts) {
+ 				merge  : opts.merge,
+ 				offset : opts.offset,
+ 				exists : opts.exists
+-			}, function (err, data) {
++			}, opts.transaction, function (err, data) {
+ 				if (err) {
+ 					return cb(err);
+ 				}
+diff --git a/node_modules/orm/lib/Drivers/DML/postgres.js b/node_modules/orm/lib/Drivers/DML/postgres.js
+index 12f13d7..d0e1e1b 100644
+--- a/node_modules/orm/lib/Drivers/DML/postgres.js
++++ b/node_modules/orm/lib/Drivers/DML/postgres.js
+@@ -57,25 +57,95 @@ var switchableFunctions = {
+ 				cb(err);
+ 			});
+ 		},
+-		execSimpleQuery: function (query, cb) {
+-			if (this.opts.debug) {
+-				require("../../Debug").sql('postgres', query);
+-			}
+-			this.db.connect(this.config, function (err, client, done) {
+-				if (err) return cb(err);
+-
+-				client.query(query, function (err, result) {
+-					done();
+-
+-					if (err) {
+-						cb(err);
+-					} else {
+-						cb(null, result.rows);
+-					}
+-				});
+-			});
++        // query, [tx], cb
++		execSimpleQuery: function () {
++            var args = Array.prototype.slice.apply(arguments);
++            var query = args[0];
++
++            var transaction = null;
++            if (args.length == 3) {
++                transaction = args[1];
++            }
++
++            var cb = args.pop();
++
++            if (this.opts.debug) {
++                require("../../Debug").sql('postgres', query);
++            }
++
++            if (transaction && transaction != null) {
++                transaction.client.query(query, function (err, result) {
++                    if (err) {
++                        cb(err);
++                    } else {
++                        cb(null, result.rows);
++                    }
++                });
++            } else {
++                this.db.connect(this.config, function (err, client, done) {
++                    if (err) return cb(err);
++
++                    client.query(query, function (err, result) {
++                        done();
++
++                        if (err) {
++                            cb(err);
++                        } else {
++                            cb(null, result.rows);
++                        }
++                    });
++                });
++            }
+ 			return this;
+ 		},
++        /**
++         * Start a transaction.
++         *
++         * @param cb the callback
++         */
++        transaction: function(cb) {
++
++            var debug = this.opts.debug;
++            this.db.connect(this.config, function (err, client, done) {
++                if (err) return cb(err);
++
++                client.query("BEGIN", function(err) {
++                    return cb(null, {
++                        // the db client
++                        client: client,
++
++                        /**
++                         * Commit the transaction.
++                         *
++                         * @param commitCb the callback
++                         */
++                        commit: function (commitCb) {
++                            if (debug) require("../../Debug").sql('postgres', 'COMMIT');
++                            client.query("COMMIT", function (err) {
++                                done(err);
++                                return commitCb(err || null);
++                            });
++                        },
++
++                        /**
++                         * Rollback the transaction.
++                         *
++                         * @param commitCb the callback
++                         */
++                        rollback: function (rollbackCb) {
++                            if (debug) require("../../Debug").sql('postgres', 'ROLLBACK');
++                            client.query("ROLLBACK", function (err) {
++                                done(err);
++                                return rollbackCb(err || null);
++                            });
++                        }
++                    });
++
++                });
++
++            });
++
++        },
+ 		on: function(ev, cb) {
+ 			// Because `pg` is the same for all instances of this driver
+ 			// we can't keep adding listeners since they are never removed.
+@@ -86,7 +156,11 @@ var switchableFunctions = {
+ 		connect: function (cb) {
+ 			this.db.connect(cb);
+ 		},
+-		execSimpleQuery: function (query, cb) {
++		execSimpleQuery: function () {
++            var args = Array.prototype.slice.apply(arguments);
++            var query = args[0];
++            var cb = args.pop();
++
+ 			if (this.opts.debug) {
+ 				require("../../Debug").sql('postgres', query);
+ 			}
+@@ -99,6 +173,40 @@ var switchableFunctions = {
+ 			});
+ 			return this;
+ 		},
++
++        /**
++         * Start a transaction.
++         *
++         * @param cb the callback
++         */
++        transaction: function(cb) {
++            this.db.query("BEGIN", function(err) {
++                return cb(null, {
++                    /**
++                     * Commit the transaction.
++                     *
++                     * @param commitCb the callback
++                     */
++                    commit: function (commitCb) {
++                        this.db.query("COMMIT", function (err) {
++                            return commitCb(err || null);
++                        });
++                    },
++
++                    /**
++                     * Rollback the transaction.
++                     *
++                     * @param commitCb the callback
++                     */
++                    rollback: function (rollbackCb) {
++                        this.db.query("ROLLBACK", function (err) {
++                            return rollbackCb(err || null);
++                        });
++                    }
++                });
++
++            });
++        },
+ 		on: function(ev, cb) {
+ 			if (ev == "error") {
+ 				this.db.on("error", cb);
+@@ -137,7 +245,20 @@ Driver.prototype.getQuery = function () {
+ 	return this.query;
+ };
+ 
+-Driver.prototype.find = function (fields, table, conditions, opts, cb) {
++Driver.prototype.find = function () {
++
++    var args = Array.prototype.slice.apply(arguments);
++    var fields = args[0];
++    var table = args[1];
++    var conditions = args[2];
++    var opts = args[3];
++
++    var transaction = null;
++    if (args.length == 6) {
++        transaction = args[4];
++    }
++    var cb = args.pop();
++
+ 	var q = this.query.select()
+ 	                  .from(table).select(fields);
+ 
+@@ -172,10 +293,24 @@ Driver.prototype.find = function (fields, table, conditions, opts, cb) {
+ 
+ 	q = q.build();
+ 
+-	this.execSimpleQuery(q, cb);
++    this.execSimpleQuery(q, transaction, cb);
++
+ };
+ 
+-Driver.prototype.count = function (table, conditions, opts, cb) {
++Driver.prototype.count = function () {
++    var args = Array.prototype.slice.apply(arguments);
++
++    var table = args[0];
++    var conditions = args[1];
++    var opts = args[2];
++
++    var transaction = null;
++    if (args.length == 5) {
++        transaction = args[3];
++    }
++    var cb = args.pop();
++
++
+ 	var q = this.query.select()
+ 	                  .from(table)
+ 	                  .count(null, 'c');
+@@ -199,16 +334,29 @@ Driver.prototype.count = function (table, conditions, opts, cb) {
+ 
+ 	q = q.build();
+ 
+-	this.execSimpleQuery(q, cb);
++	this.execSimpleQuery(q, transaction, cb);
+ };
+ 
+-Driver.prototype.insert = function (table, data, id_prop, cb) {
++Driver.prototype.insert = function () {
++    var args = Array.prototype.slice.apply(arguments);
++
++    var table = args[0];
++    var data = args[1];
++    var id_prop = args[2];
++
++    var transaction = null;
++    if (args.length == 5) {
++        transaction = args[3];
++    }
++    var cb = args.pop();
++
++
+ 	var q = this.query.insert()
+ 	                  .into(table)
+ 	                  .set(data)
+ 	                  .build();
+ 
+-	this.execSimpleQuery(q + " RETURNING *", function (err, results) {
++	this.execSimpleQuery(q + " RETURNING *", transaction, function (err, results) {
+ 		if (err) {
+ 			return cb(err);
+ 		}
+@@ -225,29 +373,60 @@ Driver.prototype.insert = function (table, data, id_prop, cb) {
+ 	});
+ };
+ 
+-Driver.prototype.update = function (table, changes, conditions, cb) {
++Driver.prototype.update = function () {
++    var args = Array.prototype.slice.apply(arguments);
++    var table = args[0];
++    var changes = args[1];
++    var conditions = args[2];
++
++    var transaction = null;
++    if (args.length == 5) {
++        transaction = args[3];
++    }
++    var cb = args.pop();
++
+ 	var q = this.query.update()
+ 	                  .into(table)
+ 	                  .set(changes)
+ 	                  .where(conditions)
+ 	                  .build();
+ 
+-	this.execSimpleQuery(q, cb);
++	this.execSimpleQuery(q, transaction, cb);
+ };
+ 
+-Driver.prototype.remove = function (table, conditions, cb) {
++Driver.prototype.remove = function () {
++    var args = Array.prototype.slice.apply(arguments);
++    var table = args[0];
++    var conditions = args[1];
++
++    var transaction = null;
++    if (args.length == 4) {
++        transaction = args[2];
++    }
++    var cb = args.pop();
++
+ 	var q = this.query.remove()
+ 	                  .from(table)
+ 	                  .where(conditions)
+ 	                  .build();
+ 
+-	this.execSimpleQuery(q, cb);
++	this.execSimpleQuery(q, transaction, cb);
+ };
+ 
+-Driver.prototype.clear = function (table, cb) {
++Driver.prototype.clear = function () {
++    var args = Array.prototype.slice.apply(arguments);
++    var table = args[0];
++
++    var transaction = null;
++    if (args.length == 3) {
++        transaction = args[1];
++    }
++    var cb = args.pop();
++
++
+ 	var q = "TRUNCATE TABLE " + this.query.escapeId(table);
+ 
+-	this.execSimpleQuery(q, cb);
++	this.execSimpleQuery(q, transaction, cb);
+ };
+ 
+ Driver.prototype.valueToProperty = function (value, property) {
+diff --git a/node_modules/orm/lib/Drivers/helpers.js b/node_modules/orm/lib/Drivers/helpers.js
+index dce8a0e..32351e7 100644
+--- a/node_modules/orm/lib/Drivers/helpers.js
++++ b/node_modules/orm/lib/Drivers/helpers.js
+@@ -1,13 +1,28 @@
+ 
+ module.exports.sql = {
+ 	execQuery: function () {
+-		if (arguments.length == 2) {
+-			var query = arguments[0];
+-			var cb    = arguments[1];
+-		} else if (arguments.length == 3) {
+-			var query = this.query.escape(arguments[0], arguments[1]);
+-			var cb    = arguments[2];
++
++        var args = Array.prototype.slice.apply(arguments);
++        var cb = args.pop();
++
++        var transaction = args.pop();
++        if (transaction == null) {
++            // skip it
++        } else if (transaction != null && typeof transaction.commit === 'function'
++            && typeof transaction.rollback === 'function') {
++            // transaction is provided
++        } else {
++            // no transaction
++            args.push(transaction);
++            transaction = null;
++        }
++
++        var query = null;
++		if (args.length == 1) {
++			query = args[0];
++		} else if (args.length == 2) {
++			query = this.query.escape(args[0], args[1]);
+ 		}
+-		return this.execSimpleQuery(query, cb);
++		return this.execSimpleQuery(query, transaction, cb);
+ 	}
+ }
+diff --git a/node_modules/orm/lib/Instance.js b/node_modules/orm/lib/Instance.js
+index 68f624b..51e229f 100644
+--- a/node_modules/orm/lib/Instance.js
++++ b/node_modules/orm/lib/Instance.js
+@@ -193,7 +193,7 @@ function Instance(Model, opts) {
+ 	var saveNew = function (cb, saveOptions, data) {
+ 		var next = afterSave.bind(this, cb, true);
+ 
+-		opts.driver.insert(opts.table, data, opts.id, function (save_err, info) {
++		opts.driver.insert(opts.table, data, opts.id, opts.transaction, function (save_err, info) {
+ 			if (save_err) {
+ 				return saveError(cb, save_err);
+ 			}
+@@ -222,7 +222,7 @@ function Instance(Model, opts) {
+ 		    conditions[opts.id[i]] = data[opts.id[i]];
+ 		}
+ 
+-		opts.driver.update(opts.table, changes, conditions, function (save_err) {
++		opts.driver.update(opts.table, changes, conditions, opts.transaction, function (save_err) {
+ 			if (save_err) {
+ 				return saveError(cb, save_err);
+ 			}
+@@ -332,7 +332,7 @@ function Instance(Model, opts) {
+ 		    conditions[opts.extra_info.assoc_prop[i]] = opts.data[opts.id[i]];
+ 		}
+ 
+-		opts.driver.update(opts.extra_info.table, data, conditions, function (err) {
++		opts.driver.update(opts.extra_info.table, data, conditions, opts.transaction, function (err) {
+ 			if (cb)	return cb(err, instance);
+ 		});
+ 	};
+@@ -357,7 +357,7 @@ function Instance(Model, opts) {
+ 
+ 			emitEvent("beforeRemove", instance);
+ 
+-			opts.driver.remove(opts.table, conditions, function (err, data) {
++			opts.driver.remove(opts.table, conditions, opts.transaction, function (err, data) {
+ 				Hook.trigger(instance, opts.hooks.afterRemove, !err);
+ 
+ 				emitEvent("remove", err, instance);
+@@ -392,7 +392,7 @@ function Instance(Model, opts) {
+ 				return;
+ 			}
+ 
+-			opts.driver.update(opts.table, changes, conditions, function (err) {
++			opts.driver.update(opts.table, changes, conditions, opts.transaction, function (err) {
+ 				if (!err) {
+ 					opts.data[key] = value;
+ 				}
+diff --git a/node_modules/orm/lib/LazyLoad.js b/node_modules/orm/lib/LazyLoad.js
+index 8ee5633..7e9dcf1 100644
+--- a/node_modules/orm/lib/LazyLoad.js
++++ b/node_modules/orm/lib/LazyLoad.js
+@@ -14,7 +14,7 @@ function addLazyLoadProperty(name, Instance, Model, property) {
+ 			var conditions = {};
+ 			conditions[Model.id] = Instance[Model.id];
+ 
+-			Model.find(conditions, { cache: false }).only(property).first(function (err, item) {
++			Model.find(conditions, { cache: false }, Instance.transaction).only(property).first(function (err, item) {
+ 				return cb(err, item ? item[property] : null);
+ 			});
+ 
+@@ -27,7 +27,7 @@ function addLazyLoadProperty(name, Instance, Model, property) {
+ 			var conditions = {};
+ 			conditions[Model.id] = Instance[Model.id];
+ 
+-			Model.find(conditions, { cache: false }).only(property).first(function (err, item) {
++			Model.find(conditions, { cache: false }, Instance.transaction).only(property).first(function (err, item) {
+ 				if (err) {
+ 					return cb(err);
+ 				}
+@@ -50,7 +50,7 @@ function addLazyLoadProperty(name, Instance, Model, property) {
+ 			var conditions = {};
+ 			conditions[Model.id] = Instance[Model.id];
+ 
+-			Model.find(conditions, { cache: false }).first(function (err, item) {
++			Model.find(conditions, { cache: false }, Instance.transaction).first(function (err, item) {
+ 				if (err) {
+ 					return cb(err);
+ 				}
+diff --git a/node_modules/orm/lib/Model.js b/node_modules/orm/lib/Model.js
+index 188ba3a..8b0d58d 100644
+--- a/node_modules/orm/lib/Model.js
++++ b/node_modules/orm/lib/Model.js
+@@ -101,7 +101,8 @@ function Model(opts) {
+ 			one_associations       : one_associations,
+ 			many_associations      : many_associations,
+ 			extend_associations    : extend_associations,
+-			association_properties : association_properties
++			association_properties : association_properties,
++            transaction            : inst_opts.transaction
+ 		});
+ 		instance.on("ready", function (err) {
+ 			if (--pending > 0) {
+@@ -247,6 +248,8 @@ function Model(opts) {
+ 		    throw ErrorCodes.generateError(ErrorCodes.MISSING_CALLBACK, "Missing Model.get() callback", { model: opts.table });
+ 		}
+ 
++        var transaction = Utilities.getTransaction(ids);
++
+ 		if (typeof ids[ids.length - 1] === "object" && !Array.isArray(ids[ids.length - 1])) {
+ 			options = ids.pop();
+ 		}
+@@ -273,7 +276,7 @@ function Model(opts) {
+ 			options.cascadeRemove = opts.cascadeRemove;
+ 		}
+ 
+-		opts.driver.find(model_fields, opts.table, conditions, { limit: 1 }, function (err, data) {
++		opts.driver.find(model_fields, opts.table, conditions, { limit: 1 }, transaction, function (err, data) {
+ 			if (err) {
+ 				return cb(ErrorCodes.generateError(ErrorCodes.QUERY_ERROR, err.message, { originalCode: err.code }));
+ 			}
+@@ -306,8 +309,15 @@ function Model(opts) {
+ 		var cb         = null;
+ 		var order      = null;
+ 		var merge      = null;
++        var transaction = null;
+ 
+ 		for (var i = 0; i < arguments.length; i++) {
++            if (arguments[i] == null) continue;
++            if (Utilities.isTransaction(arguments[i])) {
++                transaction = arguments[i];
++                continue;
++            }
++
+ 			switch (typeof arguments[i]) {
+ 				case "number":
+ 					options.limit = arguments[i];
+@@ -379,6 +389,7 @@ function Model(opts) {
+ 			order        : order,
+ 			merge        : merge,
+ 			offset       : options.offset,
++            transaction  : transaction,
+ 			newInstance  : function (data, cb) {
+ 				var uid = opts.driver.uid + "/" + opts.table + (merge ? "+" + merge.from.table : "");
+ 				for (var i = 0; i < opts.id.length; i++) {
+@@ -396,7 +407,8 @@ function Model(opts) {
+ 						autoFetchLimit : options.autoFetchLimit,
+ 						cascadeRemove  : options.cascadeRemove,
+ 						extra          : options.extra,
+-						extra_info     : options.extra_info
++						extra_info     : options.extra_info,
++                        transaction    : transaction
+ 					}, cb);
+ 				}, cb);
+ 			}
+@@ -415,22 +427,19 @@ function Model(opts) {
+ 
+ 	model.one = function () {
+ 		var args = Array.prototype.slice.apply(arguments);
+-		var cb   = null;
++		var cb   = args.pop();
+ 
+-		// extract callback
+-		for (var i = 0; i < args.length; i++) {
+-			if (typeof args[i] === "function") {
+-				cb = args.splice(i, 1)[0];
+-				break;
+-			}
+-		}
+-
+-		if (cb === null) {
++		if (typeof cb !== "function") {
+ 		    throw ErrorCodes.generateError(ErrorCodes.MISSING_CALLBACK, "Missing Model.one() callback", { model: opts.table });
+ 		}
+ 
++        var transaction = Utilities.getTransaction(args);
++
+ 		// add limit 1
+ 		args.push(1);
++        if (transaction != null) {
++            args.push(transaction);
++        }
+ 		args.push(function (err, results) {
+ 			if (err) {
+ 				return cb(err);
+@@ -442,29 +451,30 @@ function Model(opts) {
+ 	};
+ 
+ 	model.count = function () {
++        var args = Array.prototype.slice.apply(arguments);
++
+ 		var conditions = null;
+-		var cb         = null;
++		var cb         = args.pop();
+ 
+-		for (var i = 0; i < arguments.length; i++) {
+-			switch (typeof arguments[i]) {
++        if (typeof cb !== "function") {
++            throw ErrorCodes.generateError(ErrorCodes.MISSING_CALLBACK, "Missing Model.count() callback", { model: opts.table });
++        }
++
++        var transaction = Utilities.getTransaction(args);
++
++		for (var i = 0; i < args.length; i++) {
++			switch (typeof args[i]) {
+ 				case "object":
+-					conditions = arguments[i];
+-					break;
+-				case "function":
+-					cb = arguments[i];
++					conditions = args[i];
+ 					break;
+ 			}
+ 		}
+ 
+-		if (typeof cb !== "function") {
+-		    throw ErrorCodes.generateError(ErrorCodes.MISSING_CALLBACK, "Missing Model.count() callback", { model: opts.table });
+-		}
+-
+ 		if (conditions) {
+ 			conditions = Utilities.checkConditions(conditions, one_associations);
+ 		}
+ 
+-		opts.driver.count(opts.table, conditions, {}, function (err, data) {
++		opts.driver.count(opts.table, conditions, {}, transaction, function (err, data) {
+ 			if (err || data.length === 0) {
+ 				return cb(err);
+ 			}
+@@ -474,15 +484,19 @@ function Model(opts) {
+ 	};
+ 
+ 	model.aggregate = function () {
++        var args = Array.prototype.slice.apply(arguments);
++
++        var transaction = Utilities.getTransaction(args);
++
+ 		var conditions = {};
+ 		var properties = [];
+ 
+-		for (var i = 0; i < arguments.length; i++) {
+-			if (typeof arguments[i] === "object") {
+-				if (Array.isArray(arguments[i])) {
+-					properties = arguments[i];
++		for (var i = 0; i < args.length; i++) {
++			if (typeof args[i] === "object") {
++				if (Array.isArray(args[i])) {
++					properties = args[i];
+ 				} else {
+-					conditions = arguments[i];
++					conditions = args[i];
+ 				}
+ 			}
+ 		}
+@@ -496,7 +510,8 @@ function Model(opts) {
+ 			driver_name : opts.driver_name,
+ 			driver      : opts.driver,
+ 			conditions  : conditions,
+-			properties  : properties
++			properties  : properties,
++            transaction : transaction
+ 		});
+ 	};
+ 
+@@ -508,6 +523,8 @@ function Model(opts) {
+ 		    throw ErrorCodes.generateError(ErrorCodes.MISSING_CALLBACK, "Missing Model.exists() callback", { model: opts.table });
+ 		}
+ 
++        var transaction = Utilities.getTransaction(ids);
++
+ 		var conditions = {}, i;
+ 
+ 		if (ids.length === 1 && typeof ids[0] === "object") {
+@@ -528,7 +545,7 @@ function Model(opts) {
+ 			conditions = Utilities.checkConditions(conditions, one_associations);
+ 		}
+ 
+-		opts.driver.count(opts.table, conditions, {}, function (err, data) {
++		opts.driver.count(opts.table, conditions, {}, transaction, function (err, data) {
+ 			if (err || data.length === 0) {
+ 				return cb(err);
+ 			}
+@@ -541,6 +558,11 @@ function Model(opts) {
+ 		var Instances = [];
+ 		var options = {};
+ 		var cb = null, idx = 0, single = false;
++
++        var args = Array.prototype.slice.apply(arguments);
++        cb = args.pop();
++        var transaction = Utilities.getTransaction(args);
++
+ 		var createNext = function () {
+ 			if (idx >= Instances.length) {
+ 				return cb(null, single ? Instances[0] : Instances);
+@@ -549,7 +571,8 @@ function Model(opts) {
+ 			Instances[idx] = createInstance(Instances[idx], {
+ 				is_new    : true,
+ 				autoSave  : opts.autoSave,
+-				autoFetch : false
++				autoFetch : false,
++                transaction : transaction
+ 			}, function (err) {
+ 				if (err) {
+ 					err.index = idx;
+@@ -570,21 +593,18 @@ function Model(opts) {
+ 			});
+ 		};
+ 
+-		for (var i = 0; i < arguments.length; i++) {
+-			switch (typeof arguments[i]) {
++		for (var i = 0; i < args.length; i++) {
++			switch (typeof args[i]) {
+ 				case "object":
+-					if ( !single && Array.isArray(arguments[i]) ) {
+-						Instances = Instances.concat(arguments[i]);
++					if ( !single && Array.isArray(args[i]) ) {
++						Instances = Instances.concat(args[i]);
+ 					} else if (i === 0) {
+ 						single = true;
+-						Instances.push(arguments[i]);
++						Instances.push(args[i]);
+ 					} else {
+-						options = arguments[i];
++						options = args[i];
+ 					}
+ 					break;
+-				case "function":
+-					cb = arguments[i];
+-					break;
+ 			}
+ 		}
+ 
+@@ -594,7 +614,11 @@ function Model(opts) {
+ 	};
+ 
+ 	model.clear = function (cb) {
+-		opts.driver.clear(opts.table, function (err) {
++        var args = Array.prototype.slice.apply(arguments);
++        var cb = args.pop();
++        var transaction = Utilities.getTransaction(args);
++
++		opts.driver.clear(opts.table, transaction, function (err) {
+ 			if (typeof cb === "function") cb(err);
+ 		});
+ 
+diff --git a/node_modules/orm/lib/ORM.js b/node_modules/orm/lib/ORM.js
+index fff4dd7..55d9811 100644
+--- a/node_modules/orm/lib/ORM.js
++++ b/node_modules/orm/lib/ORM.js
+@@ -252,6 +252,19 @@ ORM.prototype.ping = function (cb) {
+ 
+ 	return this;
+ };
++
++/**
++ * Start a new transaction.
++ *
++ * @param cb the callback function
++ * @returns {ORM} the ORM instance for chaining
++ */
++ORM.prototype.transaction = function(cb) {
++    this.driver.transaction(cb);
++
++    return this;
++};
++
+ ORM.prototype.close = function (cb) {
+ 	this.driver.close(cb);
+ 
+diff --git a/node_modules/orm/lib/Utilities.js b/node_modules/orm/lib/Utilities.js
+index aa79d48..ba5972c 100644
+--- a/node_modules/orm/lib/Utilities.js
++++ b/node_modules/orm/lib/Utilities.js
+@@ -248,3 +248,36 @@ exports.getRealPath = function (path_str, stack_index) {
+ 
+ 	return path_str;
+ };
++
++/**
++ * Get transaction from the last element of args array.
++ * @param args the arguments
++ * @returns the transaction object or null if doesn't exist.
++ */
++exports.getTransaction = function(args) {
++    if (args.length === 0) return null;
++
++    var transaction = args.pop();
++
++    if (transaction == null) {
++        // skip the null value
++    } else if (transaction != null && typeof transaction === 'object' &&
++        typeof transaction.commit === 'function' && typeof transaction.rollback === 'function') {
++        // transaction is provided
++    } else {
++        args.push(transaction);
++        transaction = null;
++    }
++    return transaction;
++}
++
++/**
++ * Check the given object is transaction or not.
++ *
++ * @param transaction the object to check
++ * @returns {boolean} return true if the given object is transaction, return false otherwise
++ */
++exports.isTransaction = function(transaction) {
++    return (transaction != null && typeof transaction === 'object' &&
++        typeof transaction.commit === 'function' && typeof transaction.rollback === 'function');
++}

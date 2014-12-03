@@ -1,0 +1,26 @@
+1.  I might be nitpicking, but since your Model.js (in the orm module) has change the arguments to call the Drivers; all other drivers are supposed to be changed either.
+
+To be more specific, the Model.js now calls the drivers with five arguments but the other drivers (MySQL, etc) are still expecting four parameters.
+
+A better solution is needed, or you should make sure they are all compatible. Otherwise the merged node-orm is broken.
+> Mentioned this in AS. 
+
+2. There is one concern with single thread implementation. You've changed single.coffee with using pool, but I believe what was needed to do as per http://apps.topcoder.com/forums/?module=Thread&threadID=836163&start=0 "But I assume that is also a bug as it should report that a transaction already started or it should block the transaction queries until the current one is closed/committed/rolledback." is to either block the queue till operation end or update the message. This was not provided.
+> see : http://apps.topcoder.com/forums/?module=Thread&threadID=837258&start=0&mc=8#1946559
+
+3. In postgres.js lines:
++    var args = Array.prototype.slice.apply(arguments);
++    var fields = args[0];
++    var table = args[1];
++    var conditions = args[2];
++    var opts = args[3];
++
++    var transaction = null;
++    if (args.length == 6) {
++        transaction = args[4];
++    }
+
+> mentioned in Assembly spec 1.2.1
+
+4.  ADS 1.1.4.1 and 1.1.4.2 should provide sample transaction rollback usage.
+> added.
